@@ -247,6 +247,17 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
+
+	// Health endpoints
+	r.Get("/live", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	r.Get("/mtr", mtrHandler)
 	r.Get("/ping", pingHandler)
 

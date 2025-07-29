@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 func atoi(s string) int {
@@ -28,6 +29,32 @@ func isValidIPv4(ip string) bool {
 func isValidDomain(domain string) bool {
 	matched, _ := regexp.MatchString(`^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`, domain)
 	return matched && len(domain) <= 253
+}
+
+func runCommandBuffered(cmd *exec.Cmd, parser func(string) (map[string]interface{}, error)) ([]map[string]interface{}, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var results []map[string]interface{}
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		out, err := parser(line)
+		if err == nil && out != nil {
+			results = append(results, out)
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }
 
 // Common function to run a command and stream its output parsed by a given parser
@@ -165,14 +192,25 @@ func mtrHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid target"})
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Transfer-Encoding", "chunked")
 
 	cmd := exec.Command("mtr", "--raw", "--no-dns", "--report-cycles", "10", target)
+	streaming := r.URL.Query().Get("streaming") == "true"
 
-	if err := streamCommand(w, cmd, parseMTRRaw); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+	if streaming {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		if err := streamCommand(w, cmd, parseMTRRaw); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		}
+	} else {
+		results, err := runCommandBuffered(cmd, parseMTRRaw)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	}
 }
 
@@ -183,19 +221,32 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid target"})
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Transfer-Encoding", "chunked")
 
 	cmd := exec.Command("ping", "-c", "10", target)
 
-	if err := streamCommand(w, cmd, parsePing); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+	streaming := r.URL.Query().Get("streaming") == "true"
+
+	if streaming {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		if err := streamCommand(w, cmd, parsePing); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		}
+	} else {
+		results, err := runCommandBuffered(cmd, parsePing)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	}
 }
 
 func main() {
 	r := chi.NewRouter()
+	r.Use(middleware.Logger)
 	r.Get("/mtr", mtrHandler)
 	r.Get("/ping", pingHandler)
 
